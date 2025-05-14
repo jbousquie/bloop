@@ -1,4 +1,5 @@
 use macroquad::prelude::*;
+use macroquad_particles::{self as particles, ColorCurve, Emitter, EmitterConfig};
 use std::fs;
 
 // https://mq.agical.se/index.html
@@ -32,6 +33,24 @@ impl Shape {
     }
 }
 
+// Shader
+const FRAGMENT_SHADER: &str = include_str!("starfield-shader.glsl");
+const VERTEX_SHADER: &str = "#version 100
+attribute vec3 position;
+attribute vec3 textcoord;
+attribute vec4 color0;
+varying float iTime;
+
+uniform mat4 Model;
+uniform mat4 Projection;
+uniform vec4 _Time;
+
+void main() {
+gl_Position = Projection * Model * vec4(position, 1);
+iTime = _Time.x;
+}
+";
+
 #[macroquad::main("Bloop")]
 async fn main() {
     const MOVEMENT_SPEED: f32 = 200.0;
@@ -46,13 +65,47 @@ async fn main() {
         y: screen_height() * 0.5,
         collided: false,
     };
+    let mut explosions: Vec<(Emitter, Vec2)> = vec![];
     let mut score: u32 = 0;
     let mut high_score: u32 = fs::read_to_string("highscore.dat")
         .map_or(Ok(0), |i| i.parse::<u32>())
         .unwrap_or(0);
 
+    let mut direction_modifier: f32 = 0.0;
+    let render_target = render_target(320, 150);
+    render_target.texture.set_filter(FilterMode::Nearest);
+    let material = load_material(
+        ShaderSource::Glsl {
+            vertex: VERTEX_SHADER,
+            fragment: FRAGMENT_SHADER,
+        },
+        MaterialParams {
+            uniforms: vec![
+                UniformDesc::new("iResolution", UniformType::Float2),
+                UniformDesc::new("direction_modifier", UniformType::Float1),
+            ],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
     loop {
-        clear_background(DARKBLUE);
+        clear_background(BLACK);
+
+        material.set_uniform("iResolution", (screen_width(), screen_height()));
+        material.set_uniform("direction_modifier", direction_modifier);
+        gl_use_material(&material);
+        draw_texture_ex(
+            &render_target.texture,
+            0.,
+            0.,
+            WHITE,
+            DrawTextureParams {
+                dest_size: Some(vec2(screen_width(), screen_height())),
+                ..Default::default()
+            },
+        );
+        gl_use_default_material();
 
         match game_state {
             GameState::MainMenu => {
@@ -62,6 +115,7 @@ async fn main() {
                 if is_key_pressed(KeyCode::Space) {
                     squares.clear();
                     bullets.clear();
+                    explosions.clear();
                     circle.x = screen_width() * 0.5;
                     circle.y = screen_height() * 0.5;
                     score = 0;
@@ -82,9 +136,11 @@ async fn main() {
                 // Inputs
                 if is_key_down(KeyCode::Right) {
                     circle.x += MOVEMENT_SPEED * delta_time;
+                    direction_modifier += 0.05 * delta_time;
                 }
                 if is_key_down(KeyCode::Left) {
                     circle.x -= MOVEMENT_SPEED * delta_time;
+                    direction_modifier -= 0.05 * delta_time;
                 }
                 if is_key_down(KeyCode::Down) {
                     circle.y += MOVEMENT_SPEED * delta_time;
@@ -135,6 +191,13 @@ async fn main() {
                             square.collided = true;
                             score += square.size.round() as u32;
                             high_score = high_score.max(score);
+                            explosions.push((
+                                Emitter::new(EmitterConfig {
+                                    amount: square.size.round() as u32,
+                                    ..particle_explosion()
+                                }),
+                                vec2(square.x, square.y),
+                            ));
                         }
                     }
                 }
@@ -142,6 +205,7 @@ async fn main() {
                 squares.retain(|square| !square.collided);
                 bullets.retain(|bullet| bullet.y > 0.0 - bullet.size * 0.5);
                 bullets.retain(|bullet| !bullet.collided);
+                explosions.retain(|(explosion, _)| explosion.config.emitting);
 
                 if squares.iter().any(|square| circle.collides_with(square)) {
                     if score == high_score {
@@ -163,6 +227,9 @@ async fn main() {
                         square.size,
                         GREEN,
                     );
+                }
+                for (explosion, coords) in explosions.iter_mut() {
+                    explosion.draw(*coords);
                 }
                 // Text UI
                 draw_text(
@@ -213,5 +280,27 @@ async fn main() {
         }
 
         next_frame().await
+    }
+}
+
+fn particle_explosion() -> particles::EmitterConfig {
+    particles::EmitterConfig {
+        local_coords: false,
+        one_shot: true,
+        emitting: true,
+        lifetime: 0.6,
+        lifetime_randomness: 0.3,
+        explosiveness: 0.65,
+        initial_direction_spread: 2.0 * std::f32::consts::PI,
+        initial_velocity: 300.0,
+        initial_angular_velocity_randomness: 0.8,
+        size: 3.0,
+        size_randomness: 0.3,
+        colors_curve: ColorCurve {
+            start: RED,
+            mid: ORANGE,
+            end: RED,
+        },
+        ..Default::default()
     }
 }
